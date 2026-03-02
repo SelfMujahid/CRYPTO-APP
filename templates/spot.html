@@ -23,7 +23,11 @@
         <h2>Place Spot Order</h2>
         <form id="spot-form" class="form-grid">
             <label for="spot-coin">Crypto</label>
-            <input id="spot-coin" value="{{ default_coin }}" required>
+            <select id="spot-coin" required>
+                {% for coin in coin_options %}
+                <option value="{{ coin.id }}" {% if coin.id == default_coin %}selected{% endif %}>{{ coin.label }}</option>
+                {% endfor %}
+            </select>
 
             <label for="spot-side">Side</label>
             <select id="spot-side">

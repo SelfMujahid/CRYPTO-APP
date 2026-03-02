@@ -17,25 +17,53 @@ CORS(app)
 COINGECKO_SIMPLE_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
 COINGECKO_MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
 COINGECKO_MARKET_CHART_URL = "https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
+COINGECKO_OHLC_URL = "https://api.coingecko.com/api/v3/coins/{coin}/ohlc"
 
 DEFAULT_COIN = "bitcoin"
 DEFAULT_CURRENCY = "usd"
 
 INDICATORS = {"sma", "ema", "rsi", "macd"}
 TIMEFRAMES = {
-    "1m": {"days": "1", "loop_seconds": 15},
-    "5m": {"days": "1", "loop_seconds": 25},
-    "15m": {"days": "1", "loop_seconds": 35},
-    "1h": {"days": "7", "loop_seconds": 45},
-    "4h": {"days": "30", "loop_seconds": 60},
+    "1m": {"days": "1", "loop_seconds": 30},
+    "5m": {"days": "1", "loop_seconds": 55},
+    "15m": {"days": "1", "loop_seconds": 70},
+    "1h": {"days": "7", "loop_seconds": 90},
+    "4h": {"days": "30", "loop_seconds": 120},
 }
+
+COIN_OPTIONS = [
+    {"id": "bitcoin", "label": "Bitcoin (BTC)"},
+    {"id": "ethereum", "label": "Ethereum (ETH)"},
+    {"id": "tether", "label": "Tether (USDT)"},
+    {"id": "ripple", "label": "XRP"},
+    {"id": "binancecoin", "label": "BNB"},
+    {"id": "solana", "label": "Solana (SOL)"},
+    {"id": "usd-coin", "label": "USD Coin (USDC)"},
+    {"id": "dogecoin", "label": "Dogecoin (DOGE)"},
+    {"id": "cardano", "label": "Cardano (ADA)"},
+    {"id": "tron", "label": "Tron (TRX)"},
+    {"id": "chainlink", "label": "Chainlink (LINK)"},
+    {"id": "avalanche-2", "label": "Avalanche (AVAX)"},
+    {"id": "toncoin", "label": "Toncoin (TON)"},
+    {"id": "stellar", "label": "Stellar (XLM)"},
+    {"id": "polkadot", "label": "Polkadot (DOT)"},
+    {"id": "sui", "label": "Sui (SUI)"},
+    {"id": "litecoin", "label": "Litecoin (LTC)"},
+    {"id": "bitcoin-cash", "label": "Bitcoin Cash (BCH)"},
+    {"id": "shiba-inu", "label": "Shiba Inu (SHIB)"},
+    {"id": "pepe", "label": "Pepe (PEPE)"},
+]
 
 state_lock = threading.Lock()
 bot_thread: threading.Thread | None = None
+cache_lock = threading.Lock()
+response_cache: dict[str, dict] = {}
 
 demo_account = {
     "balance_usd": 10000.0,
     "spot_holdings": {},
+    "futures_positions": [],
+    "next_position_id": 1,
     "trade_history": [],
 }
 
@@ -59,6 +87,30 @@ def _safe_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _cache_get_fresh(key: str, max_age_seconds: int):
+    now = time.time()
+    with cache_lock:
+        entry = response_cache.get(key)
+        if not entry:
+            return None
+        if now - entry["stored_at"] > max_age_seconds:
+            return None
+        return entry["value"]
+
+
+def _cache_get_stale(key: str):
+    with cache_lock:
+        entry = response_cache.get(key)
+        if not entry:
+            return None
+        return entry["value"]
+
+
+def _cache_set(key: str, value) -> None:
+    with cache_lock:
+        response_cache[key] = {"stored_at": time.time(), "value": value}
 
 
 def _normalize_coin_id(raw_coin: str | None) -> str:
@@ -93,45 +145,90 @@ def _request_json(url: str, params: dict[str, str]) -> dict | list:
 
 
 def _fetch_coin_data(coin: str, currency: str) -> dict:
-    data = _request_json(
-        COINGECKO_SIMPLE_PRICE_URL,
-        {
-            "ids": coin,
-            "vs_currencies": currency,
-            "include_24hr_change": "true",
-            "include_24hr_vol": "true",
-            "include_market_cap": "true",
-            "include_last_updated_at": "true",
-        },
-    )
+    cache_key = f"simple:{coin}:{currency}"
+    fresh = _cache_get_fresh(cache_key, 15)
+    if fresh is not None:
+        return fresh
+
+    try:
+        data = _request_json(
+            COINGECKO_SIMPLE_PRICE_URL,
+            {
+                "ids": coin,
+                "vs_currencies": currency,
+                "include_24hr_change": "true",
+                "include_24hr_vol": "true",
+                "include_market_cap": "true",
+                "include_last_updated_at": "true",
+            },
+        )
+    except HTTPError as exc:
+        if exc.code == 429:
+            stale = _cache_get_stale(cache_key)
+            if stale is not None:
+                return stale
+        raise
+
     if not isinstance(data, dict):
         return {}
-    return data.get(coin, {})
+    parsed = data.get(coin, {})
+    if isinstance(parsed, dict) and parsed:
+        _cache_set(cache_key, parsed)
+    return parsed
 
 
 def _fetch_market_list(currency: str, limit: int) -> list[dict]:
-    data = _request_json(
-        COINGECKO_MARKETS_URL,
-        {
-            "vs_currency": currency,
-            "order": "market_cap_desc",
-            "per_page": str(limit),
-            "page": "1",
-            "sparkline": "false",
-            "price_change_percentage": "24h",
-        },
-    )
-    return data if isinstance(data, list) else []
+    cache_key = f"markets:{currency}:{limit}"
+    fresh = _cache_get_fresh(cache_key, 120)
+    if fresh is not None:
+        return fresh
+
+    try:
+        data = _request_json(
+            COINGECKO_MARKETS_URL,
+            {
+                "vs_currency": currency,
+                "order": "market_cap_desc",
+                "per_page": str(limit),
+                "page": "1",
+                "sparkline": "false",
+                "price_change_percentage": "24h",
+            },
+        )
+    except HTTPError as exc:
+        if exc.code == 429:
+            stale = _cache_get_stale(cache_key)
+            if stale is not None:
+                return stale
+        raise
+
+    parsed = data if isinstance(data, list) else []
+    if parsed:
+        _cache_set(cache_key, parsed)
+    return parsed
 
 
 def _fetch_price_series(coin: str, currency: str, days: str) -> list[float]:
-    data = _request_json(
-        COINGECKO_MARKET_CHART_URL.format(coin=coin),
-        {
-            "vs_currency": currency,
-            "days": days,
-        },
-    )
+    cache_key = f"series:{coin}:{currency}:{days}"
+    fresh = _cache_get_fresh(cache_key, 90)
+    if fresh is not None:
+        return fresh
+
+    try:
+        data = _request_json(
+            COINGECKO_MARKET_CHART_URL.format(coin=coin),
+            {
+                "vs_currency": currency,
+                "days": days,
+            },
+        )
+    except HTTPError as exc:
+        if exc.code == 429:
+            stale = _cache_get_stale(cache_key)
+            if stale is not None:
+                return stale
+        raise
+
     if not isinstance(data, dict):
         return []
     prices = data.get("prices")
@@ -143,7 +240,52 @@ def _fetch_price_series(coin: str, currency: str, days: str) -> list[float]:
             value = _safe_float(pair[1], 0.0)
             if value > 0:
                 parsed.append(value)
+    if parsed:
+        _cache_set(cache_key, parsed)
     return parsed
+
+
+def _fetch_ohlc(coin: str, currency: str, days: str) -> list[dict]:
+    cache_key = f"ohlc:{coin}:{currency}:{days}"
+    fresh = _cache_get_fresh(cache_key, 120)
+    if fresh is not None:
+        return fresh
+
+    try:
+        data = _request_json(
+            COINGECKO_OHLC_URL.format(coin=coin),
+            {
+                "vs_currency": currency,
+                "days": days,
+            },
+        )
+    except HTTPError as exc:
+        if exc.code == 429:
+            stale = _cache_get_stale(cache_key)
+            if stale is not None:
+                return stale
+        raise
+
+    if not isinstance(data, list):
+        return []
+
+    candles = []
+    for row in data:
+        if not isinstance(row, list) or len(row) != 5:
+            continue
+        timestamp = int(_safe_float(row[0], 0.0))
+        candles.append(
+            {
+                "time": timestamp // 1000,
+                "open": _safe_float(row[1], 0.0),
+                "high": _safe_float(row[2], 0.0),
+                "low": _safe_float(row[3], 0.0),
+                "close": _safe_float(row[4], 0.0),
+            }
+        )
+    if candles:
+        _cache_set(cache_key, candles)
+    return candles
 
 
 def _ema(values: list[float], period: int) -> float:
@@ -222,6 +364,7 @@ def _account_snapshot() -> dict:
         return {
             "balance_usd": round(demo_account["balance_usd"], 2),
             "spot_holdings": dict(demo_account["spot_holdings"]),
+            "open_futures_positions": list(demo_account["futures_positions"]),
             "recent_trades": list(demo_account["trade_history"][-25:])[::-1],
         }
 
@@ -289,14 +432,31 @@ def _execute_futures_trade(coin: str, side: str, amount_usd: float, leverage: fl
     fee = notional * 0.0006
 
     with state_lock:
-        if fee > demo_account["balance_usd"]:
-            raise ValueError("Demo balance fee ke liye kaafi nahi.")
+        total_required = amount_usd + fee
+        if total_required > demo_account["balance_usd"]:
+            raise ValueError("Demo balance margin + fee ke liye kaafi nahi.")
 
-        demo_account["balance_usd"] -= fee
+        position_id = int(demo_account["next_position_id"])
+        demo_account["next_position_id"] = position_id + 1
+        demo_account["balance_usd"] -= total_required
+
+        position = {
+            "position_id": position_id,
+            "opened_at": _now_iso(),
+            "coin": coin,
+            "side": side,
+            "margin_usd": round(amount_usd, 2),
+            "leverage": leverage,
+            "notional_usd": round(notional, 2),
+            "entry_price": round(price, 6),
+            "open_fee_usd": round(fee, 4),
+            "status": "open",
+        }
+        demo_account["futures_positions"].append(position)
 
         trade = {
             "timestamp": _now_iso(),
-            "trade_type": "manual_futures",
+            "trade_type": "manual_futures_open",
             "coin": coin,
             "side": side,
             "amount_usd": round(amount_usd, 2),
@@ -304,12 +464,120 @@ def _execute_futures_trade(coin: str, side: str, amount_usd: float, leverage: fl
             "notional_usd": round(notional, 2),
             "entry_price": round(price, 6),
             "fee_usd": round(fee, 4),
-            "status": "opened",
+            "position_id": position_id,
+            "status": "open",
         }
         _append_trade(trade)
 
         return {
             "trade": trade,
+            "position": position,
+            "balance_usd": round(demo_account["balance_usd"], 2),
+        }
+
+
+def _compute_position_live(position: dict, current_price: float) -> dict:
+    entry = _safe_float(position.get("entry_price"), 0.0)
+    leverage = _safe_float(position.get("leverage"), 1.0)
+    margin = _safe_float(position.get("margin_usd"), 0.0)
+    side = str(position.get("side", "buy"))
+    direction = 1 if side == "buy" else -1
+
+    if entry <= 0 or current_price <= 0 or margin <= 0:
+        return {
+            **position,
+            "current_price": current_price,
+            "pnl_pct": 0.0,
+            "pnl_usd": 0.0,
+        }
+
+    move_pct = ((current_price - entry) / entry) * 100.0
+    pnl_pct = move_pct * direction * leverage
+    pnl_usd = margin * (pnl_pct / 100.0)
+    return {
+        **position,
+        "current_price": round(current_price, 6),
+        "pnl_pct": round(pnl_pct, 4),
+        "pnl_usd": round(pnl_usd, 4),
+    }
+
+
+def _live_futures_positions(currency: str) -> list[dict]:
+    with state_lock:
+        positions = list(demo_account["futures_positions"])
+
+    if not positions:
+        return []
+
+    prices_by_coin: dict[str, float] = {}
+    for position in positions:
+        coin = str(position.get("coin", "")).strip().lower()
+        if not coin or coin in prices_by_coin:
+            continue
+        try:
+            market = _fetch_coin_data(coin=coin, currency=currency)
+            prices_by_coin[coin] = _safe_float(market.get(currency), 0.0)
+        except Exception:  # noqa: BLE001
+            prices_by_coin[coin] = 0.0
+
+    live = []
+    for position in positions:
+        coin = str(position.get("coin", "")).strip().lower()
+        live.append(_compute_position_live(position, prices_by_coin.get(coin, 0.0)))
+    return live
+
+
+def _close_futures_position(position_id: int, currency: str = "usd") -> dict:
+    with state_lock:
+        target = None
+        for position in demo_account["futures_positions"]:
+            if int(position.get("position_id", -1)) == position_id:
+                target = dict(position)
+                break
+        if target is None:
+            raise ValueError("Position nahi mili.")
+
+    coin = str(target.get("coin", "")).strip().lower()
+    market = _fetch_coin_data(coin=coin, currency=currency)
+    current_price = _safe_float(market.get(currency), 0.0)
+    if current_price <= 0:
+        raise ValueError("Close price fetch nahi ho saki.")
+
+    live_position = _compute_position_live(target, current_price)
+    margin = _safe_float(live_position.get("margin_usd"), 0.0)
+    pnl_usd = _safe_float(live_position.get("pnl_usd"), 0.0)
+    close_fee = _safe_float(live_position.get("notional_usd"), 0.0) * 0.0003
+
+    with state_lock:
+        target_index = -1
+        for index, position in enumerate(demo_account["futures_positions"]):
+            if int(position.get("position_id", -1)) == position_id:
+                target_index = index
+                break
+        if target_index == -1:
+            raise ValueError("Position already closed.")
+        demo_account["futures_positions"].pop(target_index)
+        demo_account["balance_usd"] += margin + pnl_usd - close_fee
+
+        close_trade = {
+            "timestamp": _now_iso(),
+            "trade_type": "manual_futures_close",
+            "position_id": int(target.get("position_id")),
+            "coin": target.get("coin"),
+            "side": target.get("side"),
+            "entry_price": target.get("entry_price"),
+            "exit_price": round(current_price, 6),
+            "margin_usd": round(margin, 2),
+            "leverage": target.get("leverage"),
+            "pnl_usd": round(pnl_usd, 4),
+            "pnl_pct": live_position.get("pnl_pct"),
+            "fee_usd": round(close_fee, 4),
+            "status": "closed",
+        }
+        _append_trade(close_trade)
+
+        return {
+            "closed_trade": close_trade,
             "balance_usd": round(demo_account["balance_usd"], 2),
         }
 
@@ -474,6 +742,7 @@ def trading_spot():
         page_name="trading",
         default_coin=DEFAULT_COIN,
         default_currency=DEFAULT_CURRENCY,
+        coin_options=COIN_OPTIONS,
     )
 
 
@@ -484,6 +753,7 @@ def trading_futures():
         page_name="trading",
         default_coin=DEFAULT_COIN,
         default_currency=DEFAULT_CURRENCY,
+        coin_options=COIN_OPTIONS,
     )
 
 
@@ -494,6 +764,18 @@ def trading_bot():
         page_name="trading",
         default_coin=DEFAULT_COIN,
         default_currency=DEFAULT_CURRENCY,
+        coin_options=COIN_OPTIONS,
+    )
+
+
+@app.route("/chart")
+def chart_page():
+    return render_template(
+        "chart.html",
+        page_name="chart",
+        default_coin=DEFAULT_COIN,
+        default_currency=DEFAULT_CURRENCY,
+        coin_options=COIN_OPTIONS,
     )
 
 
@@ -518,6 +800,8 @@ def api_market():
     try:
         data = _fetch_coin_data(coin=coin, currency=currency)
     except HTTPError as exc:
+        if exc.code == 429:
+            return jsonify({"error": "Market API rate limit hit. Thori dair baad retry karein."}), 429
         return jsonify({"error": "Market provider error", "details": f"HTTP {exc.code}"}), 502
     except URLError:
         return jsonify({"error": "Provider se connection nahi ho saka."}), 503
@@ -554,6 +838,8 @@ def api_markets():
     try:
         raw_markets = _fetch_market_list(currency=currency, limit=limit)
     except HTTPError as exc:
+        if exc.code == 429:
+            return jsonify({"error": "Market API rate limit hit. Thori dair baad retry karein."}), 429
         return jsonify({"error": "Market provider error", "details": f"HTTP {exc.code}"}), 502
     except URLError:
         return jsonify({"error": "Provider se connection nahi ho saka."}), 503
@@ -587,6 +873,89 @@ def api_markets():
     )
 
 
+@app.route("/api/ohlc", methods=["GET"])
+def api_ohlc():
+    try:
+        coin = _normalize_coin_id(request.args.get("coin"))
+        currency = _normalize_currency(request.args.get("currency"))
+        days = str(request.args.get("days", "1")).strip()
+        if days not in {"1", "7", "30", "90"}:
+            raise ValueError("days sirf 1, 7, 30, 90 ho sakta hai.")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    try:
+        candles = _fetch_ohlc(coin=coin, currency=currency, days=days)
+    except HTTPError as exc:
+        if exc.code == 429:
+            return jsonify({"error": "Market API rate limit hit. Thori dair baad retry karein."}), 429
+        return jsonify({"error": "Market provider error", "details": f"HTTP {exc.code}"}), 502
+    except URLError:
+        return jsonify({"error": "Provider se connection nahi ho saka."}), 503
+    except json.JSONDecodeError:
+        return jsonify({"error": "Provider ne invalid response diya."}), 502
+
+    return jsonify(
+        {
+            "coin": coin,
+            "currency": currency,
+            "days": days,
+            "count": len(candles),
+            "candles": candles,
+            "fetched_at": _now_iso(),
+        }
+    )
+
+
+@app.route("/api/trade/status", methods=["GET"])
+def api_trade_status():
+    currency = "usd"
+    with state_lock:
+        running_bot = bool(bot_state["running"])
+        open_bot = dict(bot_state["open_position"]) if bot_state["open_position"] else None
+
+    live_futures = _live_futures_positions(currency=currency)
+    total_futures_pnl = sum(_safe_float(item.get("pnl_usd"), 0.0) for item in live_futures)
+
+    bot_live = None
+    if open_bot:
+        coin = str(open_bot.get("coin", "")).strip().lower()
+        try:
+            market = _fetch_coin_data(coin=coin, currency=currency)
+            current_price = _safe_float(market.get(currency), 0.0)
+            if current_price > 0:
+                side = str(open_bot.get("side", "buy"))
+                entry_price = _safe_float(open_bot.get("entry_price"), 0.0)
+                leverage = _safe_float(open_bot.get("leverage"), 1.0)
+                amount_usd = _safe_float(open_bot.get("amount_usd"), 0.0)
+                direction = 1 if side == "buy" else -1
+                if entry_price > 0 and amount_usd > 0:
+                    move_pct = ((current_price - entry_price) / entry_price) * 100.0
+                    pnl_pct = move_pct * direction * leverage
+                    pnl_usd = amount_usd * (pnl_pct / 100.0)
+                    bot_live = {
+                        **open_bot,
+                        "current_price": round(current_price, 6),
+                        "pnl_pct": round(pnl_pct, 4),
+                        "pnl_usd": round(pnl_usd, 4),
+                    }
+        except Exception:  # noqa: BLE001
+            bot_live = {**open_bot, "current_price": None, "pnl_pct": None, "pnl_usd": None}
+
+    with state_lock:
+        return jsonify(
+            {
+                "balance_usd": round(demo_account["balance_usd"], 2),
+                "futures_open_count": len(demo_account["futures_positions"]),
+                "futures_positions": live_futures,
+                "futures_total_pnl_usd": round(total_futures_pnl, 4),
+                "bot_running": running_bot,
+                "bot_open_position": bot_live,
+                "updated_at": _now_iso(),
+            }
+        )
+
+
 @app.route("/api/trade/execute", methods=["POST"])
 def api_trade_execute():
     payload = request.get_json(silent=True) or {}
@@ -609,6 +978,8 @@ def api_trade_execute():
         if price <= 0:
             return jsonify({"error": "Coin price fetch nahi ho saki."}), 502
     except HTTPError as exc:
+        if exc.code == 429:
+            return jsonify({"error": "Market API rate limit hit. Thori dair baad retry karein."}), 429
         return jsonify({"error": "Market provider error", "details": f"HTTP {exc.code}"}), 502
     except URLError:
         return jsonify({"error": "Provider se connection nahi ho saka."}), 503
@@ -630,6 +1001,30 @@ def api_trade_execute():
             return jsonify({"error": "market_type sirf spot ya futures ho sakta hai."}), 400
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+    return jsonify(result)
+
+
+@app.route("/api/trade/close", methods=["POST"])
+def api_trade_close():
+    payload = request.get_json(silent=True) or {}
+    try:
+        position_id = int(payload.get("position_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "position_id required hai."}), 400
+
+    try:
+        result = _close_futures_position(position_id=position_id, currency="usd")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except HTTPError as exc:
+        if exc.code == 429:
+            return jsonify({"error": "Market API rate limit hit. Thori dair baad retry karein."}), 429
+        return jsonify({"error": "Market provider error", "details": f"HTTP {exc.code}"}), 502
+    except URLError:
+        return jsonify({"error": "Provider se connection nahi ho saka."}), 503
+    except json.JSONDecodeError:
+        return jsonify({"error": "Provider ne invalid response diya."}), 502
 
     return jsonify(result)
 
@@ -700,6 +1095,35 @@ def api_bot_stop():
 def api_bot_status():
     with state_lock:
         bot_trades = [trade for trade in demo_account["trade_history"] if str(trade.get("trade_type", "")).startswith("bot_")]
+        open_position = dict(bot_state["open_position"]) if bot_state["open_position"] else None
+
+    live_open_position = None
+    if open_position:
+        coin = str(open_position.get("coin", "")).strip().lower()
+        try:
+            market = _fetch_coin_data(coin=coin, currency="usd")
+            current_price = _safe_float(market.get("usd"), 0.0)
+            side = str(open_position.get("side", "buy"))
+            entry = _safe_float(open_position.get("entry_price"), 0.0)
+            leverage = _safe_float(open_position.get("leverage"), 1.0)
+            amount = _safe_float(open_position.get("amount_usd"), 0.0)
+            direction = 1 if side == "buy" else -1
+            if current_price > 0 and entry > 0 and amount > 0:
+                move_pct = ((current_price - entry) / entry) * 100.0
+                pnl_pct = move_pct * direction * leverage
+                pnl_usd = amount * (pnl_pct / 100.0)
+                live_open_position = {
+                    **open_position,
+                    "current_price": round(current_price, 6),
+                    "pnl_pct": round(pnl_pct, 4),
+                    "pnl_usd": round(pnl_usd, 4),
+                }
+            else:
+                live_open_position = {**open_position, "current_price": None, "pnl_pct": None, "pnl_usd": None}
+        except Exception:  # noqa: BLE001
+            live_open_position = {**open_position, "current_price": None, "pnl_pct": None, "pnl_usd": None}
+
+    with state_lock:
         return jsonify(
             {
                 "running": bot_state["running"],
@@ -708,7 +1132,7 @@ def api_bot_status():
                 "last_price": bot_state["last_price"],
                 "last_error": bot_state["last_error"],
                 "last_check_at": bot_state["last_check_at"],
-                "open_position": dict(bot_state["open_position"]) if bot_state["open_position"] else None,
+                "open_position": live_open_position,
                 "balance_usd": round(demo_account["balance_usd"], 2),
                 "recent_bot_trades": list(bot_trades[-20:])[::-1],
             }
@@ -750,6 +1174,8 @@ def legacy_trade():
         if price <= 0:
             return jsonify({"error": "Coin price fetch nahi ho saki."}), 502
     except HTTPError as exc:
+        if exc.code == 429:
+            return jsonify({"error": "Market API rate limit hit. Thori dair baad retry karein."}), 429
         return jsonify({"error": "Market provider error", "details": f"HTTP {exc.code}"}), 502
     except URLError:
         return jsonify({"error": "Provider se connection nahi ho saka."}), 503

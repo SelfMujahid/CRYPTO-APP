@@ -29,6 +29,29 @@
             <h3>Bot Trading</h3>
             <p>Indicator based bot, TP/SL percent controls, start/stop flow.</p>
         </a>
+        <a class="trading-link-card" href="/chart">
+            <h3>Chart</h3>
+            <p>Candlestick chart view, TradingView-style experience.</p>
+        </a>
+    </div>
+
+    <h3>Running Trades Status (Live P/L)</h3>
+    <div class="table-shell">
+        <table class="market-table">
+            <thead>
+                <tr>
+                    <th>Type</th>
+                    <th>Coin</th>
+                    <th>Side</th>
+                    <th>Entry</th>
+                    <th>Current</th>
+                    <th>Leverage</th>
+                    <th>P/L %</th>
+                    <th>P/L USD</th>
+                </tr>
+            </thead>
+            <tbody id="running-trades-body"></tbody>
+        </table>
     </div>
 </section>
 {% endblock %}

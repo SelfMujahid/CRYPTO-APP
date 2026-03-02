@@ -23,7 +23,11 @@
         <h2>Place Futures Order</h2>
         <form id="futures-form" class="form-grid">
             <label for="futures-coin">Crypto</label>
-            <input id="futures-coin" value="{{ default_coin }}" required>
+            <select id="futures-coin" required>
+                {% for coin in coin_options %}
+                <option value="{{ coin.id }}" {% if coin.id == default_coin %}selected{% endif %}>{{ coin.label }}</option>
+                {% endfor %}
+            </select>
 
             <label for="futures-side">Side</label>
             <select id="futures-side">
@@ -41,6 +45,24 @@
         </form>
         <p id="futures-status" class="status-text"></p>
         <p id="futures-balance" class="updated-text"></p>
+
+        <div class="table-shell">
+            <table class="market-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Coin</th>
+                        <th>Side</th>
+                        <th>Entry</th>
+                        <th>Current</th>
+                        <th>P/L %</th>
+                        <th>P/L USD</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="futures-open-body"></tbody>
+            </table>
+        </div>
     </article>
 </section>
 {% endblock %}

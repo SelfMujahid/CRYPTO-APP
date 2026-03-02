@@ -132,7 +132,7 @@ function initHomePage() {
     refreshButton.addEventListener("click", loadMarkets);
 
     loadMarkets();
-    setInterval(loadMarkets, 30000);
+    setInterval(loadMarkets, 90000);
 }
 
 async function fetchAccountAndRender(balanceElement, statusElement) {
@@ -146,10 +146,75 @@ async function fetchAccountAndRender(balanceElement, statusElement) {
     }
 }
 
+function formatTradePnlCell(value) {
+    const numeric = toSafeNumber(value);
+    return `<span class="${numeric >= 0 ? "positive" : "negative"}">${fmtMoney(numeric, "usd")}</span>`;
+}
+
+function renderRunningTradesTable(tbody, tradeStatus) {
+    if (!tbody) return;
+    tbody.innerHTML = "";
+
+    const futures = Array.isArray(tradeStatus.futures_positions) ? tradeStatus.futures_positions : [];
+    const botPosition = tradeStatus.bot_open_position;
+
+    if (!futures.length && !botPosition) {
+        const row = document.createElement("tr");
+        row.innerHTML = "<td colspan='8'>No running trades.</td>";
+        tbody.appendChild(row);
+        return;
+    }
+
+    futures.forEach((position) => {
+        const pnlPct = toSafeNumber(position.pnl_pct);
+        const row = document.createElement("tr");
+        row.innerHTML = `
+            <td>Futures #${position.position_id}</td>
+            <td>${String(position.coin || "").toUpperCase()}</td>
+            <td>${String(position.side || "").toUpperCase()}</td>
+            <td>${position.entry_price ? Number(position.entry_price).toFixed(4) : "-"}</td>
+            <td>${position.current_price ? Number(position.current_price).toFixed(4) : "-"}</td>
+            <td>${position.leverage || "-" }x</td>
+            <td class="${pnlPct >= 0 ? "positive" : "negative"}">${fmtPercent(pnlPct)}</td>
+            <td>${formatTradePnlCell(position.pnl_usd)}</td>
+        `;
+        tbody.appendChild(row);
+    });
+
+    if (botPosition) {
+        const pnlPct = toSafeNumber(botPosition.pnl_pct);
+        const row = document.createElement("tr");
+        row.innerHTML = `
+            <td>Bot</td>
+            <td>${String(botPosition.coin || "").toUpperCase()}</td>
+            <td>${String(botPosition.side || "").toUpperCase()}</td>
+            <td>${botPosition.entry_price ? Number(botPosition.entry_price).toFixed(4) : "-"}</td>
+            <td>${botPosition.current_price ? Number(botPosition.current_price).toFixed(4) : "-"}</td>
+            <td>${botPosition.leverage || "-" }x</td>
+            <td class="${pnlPct >= 0 ? "positive" : "negative"}">${fmtPercent(pnlPct)}</td>
+            <td>${formatTradePnlCell(botPosition.pnl_usd)}</td>
+        `;
+        tbody.appendChild(row);
+    }
+}
+
 function initTradingHome() {
     const balanceEl = document.getElementById("demo-balance");
     const statusEl = document.getElementById("trading-status");
-    fetchAccountAndRender(balanceEl, statusEl);
+    const runningBody = document.getElementById("running-trades-body");
+
+    const refresh = async () => {
+        await fetchAccountAndRender(balanceEl, statusEl);
+        try {
+            const tradeStatus = await requestJSON("/api/trade/status");
+            renderRunningTradesTable(runningBody, tradeStatus);
+        } catch (error) {
+            setMessage(statusEl, error.message, true);
+        }
+    };
+
+    refresh();
+    setInterval(refresh, 10000);
 }
 
 function initSpotPage() {
@@ -239,6 +304,7 @@ function initFuturesPage() {
     const bookEl = document.getElementById("futures-book");
     const statusEl = document.getElementById("futures-status");
     const balanceEl = document.getElementById("futures-balance");
+    const openBody = document.getElementById("futures-open-body");
 
     if (!coinInput || !sideSelect || !amountInput || !leverageInput || !form) return;
 
@@ -264,6 +330,44 @@ function initFuturesPage() {
             balanceEl.textContent = `Demo Balance: ${fmtMoney(toSafeNumber(account.balance_usd), "usd")}`;
         } catch (error) {
             balanceEl.textContent = `Demo Balance: ${error.message}`;
+        }
+    };
+
+    const renderOpenPositions = (positions) => {
+        if (!openBody) return;
+        openBody.innerHTML = "";
+
+        if (!positions.length) {
+            const row = document.createElement("tr");
+            row.innerHTML = "<td colspan='8'>No open futures positions.</td>";
+            openBody.appendChild(row);
+            return;
+        }
+
+        positions.forEach((position) => {
+            const pnlPct = toSafeNumber(position.pnl_pct);
+            const row = document.createElement("tr");
+            row.innerHTML = `
+                <td>${position.position_id}</td>
+                <td>${String(position.coin || "").toUpperCase()}</td>
+                <td>${String(position.side || "").toUpperCase()}</td>
+                <td>${position.entry_price ? Number(position.entry_price).toFixed(4) : "-"}</td>
+                <td>${position.current_price ? Number(position.current_price).toFixed(4) : "-"}</td>
+                <td class="${pnlPct >= 0 ? "positive" : "negative"}">${fmtPercent(pnlPct)}</td>
+                <td class="${toSafeNumber(position.pnl_usd) >= 0 ? "positive" : "negative"}">${fmtMoney(toSafeNumber(position.pnl_usd), "usd")}</td>
+                <td><button class="danger-btn close-position-btn" data-position-id="${position.position_id}">Close</button></td>
+            `;
+            openBody.appendChild(row);
+        });
+    };
+
+    const refreshPositions = async () => {
+        try {
+            const status = await requestJSON("/api/trade/status");
+            renderOpenPositions(status.futures_positions || []);
+            balanceEl.textContent = `Demo Balance: ${fmtMoney(toSafeNumber(status.balance_usd), "usd")}`;
+        } catch (error) {
+            setMessage(statusEl, error.message, true);
         }
     };
 
@@ -294,15 +398,43 @@ function initFuturesPage() {
             );
             balanceEl.textContent = `Demo Balance: ${fmtMoney(toSafeNumber(result.balance_usd), "usd")}`;
             refreshTicker();
+            refreshPositions();
         } catch (error) {
             setMessage(statusEl, error.message, true);
         }
     });
 
+    if (openBody) {
+        openBody.addEventListener("click", async (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) return;
+            if (!target.classList.contains("close-position-btn")) return;
+            const positionId = toSafeNumber(target.dataset.positionId);
+            if (!positionId) return;
+
+            setMessage(statusEl, "Position close ho rahi hai...");
+            try {
+                const result = await requestJSON("/api/trade/close", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ position_id: positionId }),
+                });
+                setMessage(statusEl, `Position #${positionId} close ho gayi.`);
+                balanceEl.textContent = `Demo Balance: ${fmtMoney(toSafeNumber(result.balance_usd), "usd")}`;
+                refreshTicker();
+                refreshPositions();
+            } catch (error) {
+                setMessage(statusEl, error.message, true);
+            }
+        });
+    }
+
     coinInput.addEventListener("change", refreshTicker);
     loadBalance();
     refreshTicker();
+    refreshPositions();
     setInterval(refreshTicker, 25000);
+    setInterval(refreshPositions, 10000);
 }
 
 function initBotPage() {
@@ -363,7 +495,10 @@ function initBotPage() {
             errorEl.textContent = data.last_error || "";
 
             if (data.open_position) {
-                openPositionEl.textContent = `Open Position: ${data.open_position.side.toUpperCase()} ${data.open_position.coin.toUpperCase()} @ ${data.open_position.entry_price}`;
+                const pnlText = data.open_position.pnl_usd != null
+                    ? ` | P/L: ${fmtMoney(toSafeNumber(data.open_position.pnl_usd), "usd")} (${fmtPercent(toSafeNumber(data.open_position.pnl_pct))})`
+                    : "";
+                openPositionEl.textContent = `Open Position: ${data.open_position.side.toUpperCase()} ${data.open_position.coin.toUpperCase()} @ ${data.open_position.entry_price}${pnlText}`;
             } else {
                 openPositionEl.textContent = "Open Position: none";
             }
@@ -413,7 +548,69 @@ function initBotPage() {
     });
 
     refreshBotStatus();
-    setInterval(refreshBotStatus, 5000);
+    setInterval(refreshBotStatus, 8000);
+}
+
+function initChartPage() {
+    const coinSelect = document.getElementById("chart-coin");
+    const daysSelect = document.getElementById("chart-days");
+    const refreshBtn = document.getElementById("chart-refresh");
+    const statusEl = document.getElementById("chart-status");
+    const chartEl = document.getElementById("candlestick-chart");
+
+    if (!coinSelect || !daysSelect || !refreshBtn || !statusEl || !chartEl || !window.LightweightCharts) return;
+
+    const chart = window.LightweightCharts.createChart(chartEl, {
+        layout: {
+            background: { color: "#ffffff" },
+            textColor: "#10223a",
+        },
+        grid: {
+            vertLines: { color: "rgba(20,163,199,0.12)" },
+            horzLines: { color: "rgba(20,163,199,0.12)" },
+        },
+        rightPriceScale: { borderColor: "rgba(20,163,199,0.26)" },
+        timeScale: { borderColor: "rgba(20,163,199,0.26)" },
+        width: chartEl.clientWidth,
+        height: chartEl.clientHeight,
+    });
+    const candles = chart.addCandlestickSeries({
+        upColor: "#16a34a",
+        downColor: "#dc2626",
+        wickUpColor: "#16a34a",
+        wickDownColor: "#dc2626",
+        borderVisible: false,
+    });
+
+    window.addEventListener("resize", () => {
+        chart.applyOptions({
+            width: chartEl.clientWidth,
+            height: chartEl.clientHeight,
+        });
+    });
+
+    const loadChart = async () => {
+        const coin = coinSelect.value;
+        const days = daysSelect.value;
+        setMessage(statusEl, "Candlestick chart load ho raha hai...");
+        try {
+            const data = await requestJSON(
+                `/api/ohlc?coin=${encodeURIComponent(coin)}&currency=${defaultCurrency}&days=${encodeURIComponent(days)}`
+            );
+            candles.setData(data.candles || []);
+            chart.timeScale().fitContent();
+            setMessage(statusEl, `Chart updated: ${coin.toUpperCase()} (${days}D)`);
+        } catch (error) {
+            setMessage(statusEl, error.message, true);
+        }
+    };
+
+    refreshBtn.addEventListener("click", loadChart);
+    coinSelect.addEventListener("change", loadChart);
+    daysSelect.addEventListener("change", loadChart);
+
+    loadChart();
+    setInterval(loadChart, 60000);
 }
 
 if (page === "home") {
@@ -430,4 +627,7 @@ if (page === "futures") {
 }
 if (page === "bot") {
     initBotPage();
+}
+if (page === "chart") {
+    initChartPage();
 }

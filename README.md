@@ -4,6 +4,7 @@ Flask based crypto dashboard with multi-page flow:
 - `Home (/)` => all crypto market list
 - `Real-Time BTC (/btc)` => intentionally blank page
 - `Trading (/trading)` => demo amount + Spot/Futures/Bot modules
+- `Chart (/chart)` => candlestick chart page
 - Spot page => `/trading/spot`
 - Futures page => `/trading/futures`
 - Bot page => `/trading/bot`
@@ -12,7 +13,10 @@ APIs:
 - `/api/account`
 - `/api/market?coin=bitcoin&currency=usd`
 - `/api/markets?currency=usd&limit=50`
+- `/api/ohlc?coin=bitcoin&currency=usd&days=1`
 - `/api/trade/execute` (spot/futures demo)
+- `/api/trade/status` (live running trade P/L)
+- `/api/trade/close` (manual close futures position)
 - `/api/bot/start`, `/api/bot/stop`, `/api/bot/status`
 
 ## Run

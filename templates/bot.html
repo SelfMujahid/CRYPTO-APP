@@ -14,7 +14,11 @@
         <h2>Bot Settings</h2>
         <form id="bot-form" class="form-grid">
             <label for="bot-coin">Crypto</label>
-            <input id="bot-coin" value="{{ default_coin }}" required>
+            <select id="bot-coin" required>
+                {% for coin in coin_options %}
+                <option value="{{ coin.id }}" {% if coin.id == default_coin %}selected{% endif %}>{{ coin.label }}</option>
+                {% endfor %}
+            </select>
 
             <label for="bot-timeframe">Time Frame</label>
             <select id="bot-timeframe">

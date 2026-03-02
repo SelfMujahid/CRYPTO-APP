@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}Chart - CRYPTO-APP-DEMO{% endblock %}
+{% block page_id %}chart{% endblock %}
+
+{% block head_extra %}
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+{% endblock %}
+
+{% block content %}
+<section class="hero-block">
+    <h1>Candlestick Chart</h1>
+    <p>TradingView style candlestick chart with coin and timeframe controls.</p>
+</section>
+
+<section class="panel-block">
+    <div class="toolbar">
+        <div class="toolbar-group">
+            <label for="chart-coin">Crypto</label>
+            <select id="chart-coin">
+                {% for coin in coin_options %}
+                <option value="{{ coin.id }}" {% if coin.id == default_coin %}selected{% endif %}>{{ coin.label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="toolbar-group">
+            <label for="chart-days">Timeframe</label>
+            <select id="chart-days">
+                <option value="1">1D</option>
+                <option value="7">7D</option>
+                <option value="30">1M</option>
+                <option value="90">3M</option>
+            </select>
+        </div>
+        <button id="chart-refresh" class="search-button">Load Chart</button>
+    </div>
+
+    <p id="chart-status" class="status-text">Chart load ho raha hai...</p>
+    <div id="candlestick-chart" class="chart-box"></div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    window.APP_CONFIG = {
+        page: "chart",
+        defaultCoin: "{{ default_coin }}",
+        defaultCurrency: "{{ default_currency }}"
+    };
+</script>
+<script src="{{ url_for('static', filename='app.js') }}" defer></script>
+{% endblock %}
