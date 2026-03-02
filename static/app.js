@@ -14,6 +14,11 @@ function fmtMoney(value, currency = "usd") {
     }).format(value);
 }
 
+function fmtMaybeMoney(value, currency = "usd") {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+    return fmtMoney(value, currency);
+}
+
 function fmtPercent(value) {
     if (typeof value !== "number" || !Number.isFinite(value)) return "N/A";
     return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
@@ -69,17 +74,25 @@ function initHomePage() {
     const currencySelect = document.getElementById("currency-select");
     const searchInput = document.getElementById("market-search");
     const refreshButton = document.getElementById("refresh-markets");
+    const loadMoreButton = document.getElementById("load-more-coins");
     const statusText = document.getElementById("home-status");
     const tableBody = document.getElementById("market-table-body");
 
-    if (!currencySelect || !searchInput || !refreshButton || !statusText || !tableBody) return;
+    if (!currencySelect || !searchInput || !refreshButton || !statusText || !tableBody || !loadMoreButton) return;
 
     let allMarkets = [];
+    let allCoins = [];
+    let hasLoadedCoins = false;
+    let visibleLimit = 600;
 
     const renderRows = (markets) => {
         tableBody.innerHTML = "";
         markets.forEach((coin, idx) => {
             const change = toSafeNumber(coin.price_change_percentage_24h);
+            const rawPrice = coin.current_price;
+            const rawVolume = coin.total_volume;
+            const rawCap = coin.market_cap;
+            const showChange = typeof coin.price_change_percentage_24h === "number";
             const row = document.createElement("tr");
             row.innerHTML = `
                 <td>${idx + 1}</td>
@@ -88,14 +101,14 @@ function initHomePage() {
                         <img src="${coin.image || ""}" alt="${coin.symbol || "coin"}">
                         <div>
                             <strong>${coin.name || "-"}</strong><br>
-                            <small>${(coin.symbol || "").toUpperCase()}</small>
+                            <small>${(coin.symbol || "").toUpperCase()} ${coin.id ? `| ${coin.id}` : ""}</small>
                         </div>
                     </div>
                 </td>
-                <td>${fmtMoney(toSafeNumber(coin.current_price), currencySelect.value)}</td>
-                <td class="${change >= 0 ? "positive" : "negative"}">${fmtPercent(change)}</td>
-                <td>${fmtMoney(toSafeNumber(coin.total_volume), currencySelect.value)}</td>
-                <td>${fmtMoney(toSafeNumber(coin.market_cap), currencySelect.value)}</td>
+                <td>${fmtMaybeMoney(rawPrice, currencySelect.value)}</td>
+                <td class="${showChange ? (change >= 0 ? "positive" : "negative") : ""}">${showChange ? fmtPercent(change) : "-"}</td>
+                <td>${fmtMaybeMoney(rawVolume, currencySelect.value)}</td>
+                <td>${fmtMaybeMoney(rawCap, currencySelect.value)}</td>
             `;
             tableBody.appendChild(row);
         });
@@ -103,36 +116,91 @@ function initHomePage() {
 
     const applyFilter = () => {
         const query = searchInput.value.trim().toLowerCase();
-        if (!query) {
-            renderRows(allMarkets);
-            return;
-        }
-        const filtered = allMarkets.filter((item) => {
-            const name = (item.name || "").toLowerCase();
-            const symbol = (item.symbol || "").toLowerCase();
-            return name.includes(query) || symbol.includes(query);
+        const marketsMap = new Map();
+        allMarkets.forEach((item) => {
+            if (item && item.id) {
+                marketsMap.set(item.id, item);
+            }
         });
-        renderRows(filtered);
+
+        let filteredCoins = allCoins;
+        if (query) {
+            filteredCoins = allCoins.filter((item) => {
+                const name = (item.name || "").toLowerCase();
+                const symbol = (item.symbol || "").toLowerCase();
+                const id = (item.id || "").toLowerCase();
+                return name.includes(query) || symbol.includes(query) || id.includes(query);
+            });
+        }
+
+        const limited = filteredCoins.slice(0, visibleLimit).map((coin) => {
+            const market = marketsMap.get(coin.id) || {};
+            return {
+                ...coin,
+                image: market.image || "",
+                current_price: market.current_price,
+                total_volume: market.total_volume,
+                market_cap: market.market_cap,
+                price_change_percentage_24h: market.price_change_percentage_24h,
+            };
+        });
+
+        renderRows(limited);
+        if (filteredCoins.length > visibleLimit) {
+            loadMoreButton.style.display = "inline-block";
+            loadMoreButton.textContent = `Load More (${Math.min(600, filteredCoins.length - visibleLimit)} more)`;
+        } else {
+            loadMoreButton.style.display = "none";
+        }
+
+        if (query) {
+            setMessage(statusText, `Results: ${filteredCoins.length} | Showing: ${limited.length}`);
+        } else {
+            setMessage(statusText, `All coins loaded: ${allCoins.length} | Showing: ${limited.length}`);
+        }
+    };
+
+    const loadCoins = async () => {
+        if (hasLoadedCoins) return;
+        setMessage(statusText, "All coins directory load ho rahi hai...");
+        try {
+            const data = await requestJSON("/api/coins");
+            allCoins = Array.isArray(data.coins) ? data.coins : [];
+            hasLoadedCoins = true;
+            applyFilter();
+        } catch (error) {
+            setMessage(statusText, error.message, true);
+        }
     };
 
     const loadMarkets = async () => {
-        setMessage(statusText, "All crypto market load ho raha hai...");
+        setMessage(statusText, "Market prices load ho rahi hain...");
         try {
-            const data = await requestJSON(`/api/markets?currency=${encodeURIComponent(currencySelect.value)}&limit=100`);
+            const data = await requestJSON(`/api/markets?currency=${encodeURIComponent(currencySelect.value)}&limit=250`);
             allMarkets = Array.isArray(data.markets) ? data.markets : [];
-            applyFilter();
-            setMessage(statusText, `Updated: ${new Date().toLocaleTimeString()}`);
+            if (!hasLoadedCoins) {
+                await loadCoins();
+            } else {
+                applyFilter();
+            }
         } catch (error) {
             setMessage(statusText, error.message, true);
         }
     };
 
     currencySelect.addEventListener("change", loadMarkets);
-    searchInput.addEventListener("input", applyFilter);
+    searchInput.addEventListener("input", () => {
+        visibleLimit = 600;
+        applyFilter();
+    });
     refreshButton.addEventListener("click", loadMarkets);
+    loadMoreButton.addEventListener("click", () => {
+        visibleLimit += 600;
+        applyFilter();
+    });
 
     loadMarkets();
-    setInterval(loadMarkets, 90000);
+    setInterval(loadMarkets, 120000);
 }
 
 async function fetchAccountAndRender(balanceElement, statusElement) {
@@ -556,38 +624,97 @@ function initChartPage() {
     const daysSelect = document.getElementById("chart-days");
     const refreshBtn = document.getElementById("chart-refresh");
     const statusEl = document.getElementById("chart-status");
-    const chartEl = document.getElementById("candlestick-chart");
+    const canvas = document.getElementById("candlestick-canvas");
 
-    if (!coinSelect || !daysSelect || !refreshBtn || !statusEl || !chartEl || !window.LightweightCharts) return;
+    if (!coinSelect || !daysSelect || !refreshBtn || !statusEl || !canvas) return;
+    let latestCandles = [];
 
-    const chart = window.LightweightCharts.createChart(chartEl, {
-        layout: {
-            background: { color: "#ffffff" },
-            textColor: "#10223a",
-        },
-        grid: {
-            vertLines: { color: "rgba(20,163,199,0.12)" },
-            horzLines: { color: "rgba(20,163,199,0.12)" },
-        },
-        rightPriceScale: { borderColor: "rgba(20,163,199,0.26)" },
-        timeScale: { borderColor: "rgba(20,163,199,0.26)" },
-        width: chartEl.clientWidth,
-        height: chartEl.clientHeight,
-    });
-    const candles = chart.addCandlestickSeries({
-        upColor: "#16a34a",
-        downColor: "#dc2626",
-        wickUpColor: "#16a34a",
-        wickDownColor: "#dc2626",
-        borderVisible: false,
-    });
+    const drawCandles = (series) => {
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
 
-    window.addEventListener("resize", () => {
-        chart.applyOptions({
-            width: chartEl.clientWidth,
-            height: chartEl.clientHeight,
+        const parent = canvas.parentElement;
+        const width = Math.max((parent?.clientWidth || 900) - 2, 320);
+        const height = Math.max((parent?.clientHeight || 520) - 2, 260);
+        canvas.width = width;
+        canvas.height = height;
+
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, width, height);
+
+        if (!Array.isArray(series) || series.length === 0) {
+            ctx.fillStyle = "#40556d";
+            ctx.font = "14px Trebuchet MS";
+            ctx.fillText("No chart data available.", 16, 30);
+            return;
+        }
+
+        const padLeft = 56;
+        const padRight = 14;
+        const padTop = 12;
+        const padBottom = 28;
+        const bodyWidth = Math.max((width - padLeft - padRight) / series.length * 0.65, 1.2);
+
+        const highs = series.map((c) => Number(c.high));
+        const lows = series.map((c) => Number(c.low));
+        const maxPrice = Math.max(...highs);
+        const minPrice = Math.min(...lows);
+        const range = Math.max(maxPrice - minPrice, 1e-6);
+
+        const yForPrice = (price) =>
+            padTop + ((maxPrice - price) / range) * (height - padTop - padBottom);
+
+        ctx.strokeStyle = "rgba(20,163,199,0.18)";
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 5; i += 1) {
+            const y = padTop + (i / 4) * (height - padTop - padBottom);
+            ctx.beginPath();
+            ctx.moveTo(padLeft, y);
+            ctx.lineTo(width - padRight, y);
+            ctx.stroke();
+
+            const price = maxPrice - (i / 4) * range;
+            ctx.fillStyle = "#556b82";
+            ctx.font = "11px Trebuchet MS";
+            ctx.fillText(price.toFixed(4), 6, y + 4);
+        }
+
+        series.forEach((candle, idx) => {
+            const x = padLeft + (idx + 0.5) * ((width - padLeft - padRight) / series.length);
+            const open = Number(candle.open);
+            const high = Number(candle.high);
+            const low = Number(candle.low);
+            const close = Number(candle.close);
+
+            const yOpen = yForPrice(open);
+            const yHigh = yForPrice(high);
+            const yLow = yForPrice(low);
+            const yClose = yForPrice(close);
+            const up = close >= open;
+            const color = up ? "#16a34a" : "#dc2626";
+
+            ctx.strokeStyle = color;
+            ctx.beginPath();
+            ctx.moveTo(x, yHigh);
+            ctx.lineTo(x, yLow);
+            ctx.stroke();
+
+            const top = Math.min(yOpen, yClose);
+            const bodyH = Math.max(Math.abs(yClose - yOpen), 1);
+            ctx.fillStyle = color;
+            ctx.fillRect(x - bodyWidth / 2, top, bodyWidth, bodyH);
         });
-    });
+
+        const step = Math.max(Math.floor(series.length / 4), 1);
+        for (let i = 0; i < series.length; i += step) {
+            const x = padLeft + (i + 0.5) * ((width - padLeft - padRight) / series.length);
+            const timeText = new Date((Number(series[i].time) || 0) * 1000).toLocaleDateString();
+            ctx.fillStyle = "#5a7188";
+            ctx.font = "10px Trebuchet MS";
+            ctx.fillText(timeText, Math.max(x - 20, padLeft), height - 8);
+        }
+    };
 
     const loadChart = async () => {
         const coin = coinSelect.value;
@@ -597,20 +724,22 @@ function initChartPage() {
             const data = await requestJSON(
                 `/api/ohlc?coin=${encodeURIComponent(coin)}&currency=${defaultCurrency}&days=${encodeURIComponent(days)}`
             );
-            candles.setData(data.candles || []);
-            chart.timeScale().fitContent();
+            latestCandles = Array.isArray(data.candles) ? data.candles : [];
+            drawCandles(latestCandles);
             setMessage(statusEl, `Chart updated: ${coin.toUpperCase()} (${days}D)`);
         } catch (error) {
             setMessage(statusEl, error.message, true);
         }
     };
 
+    window.addEventListener("resize", () => drawCandles(latestCandles));
+
     refreshBtn.addEventListener("click", loadChart);
     coinSelect.addEventListener("change", loadChart);
     daysSelect.addEventListener("change", loadChart);
 
     loadChart();
-    setInterval(loadChart, 60000);
+    setInterval(loadChart, 120000);
 }
 
 if (page === "home") {

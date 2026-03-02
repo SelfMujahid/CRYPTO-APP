@@ -12,12 +12,18 @@ Flask based crypto dashboard with multi-page flow:
 APIs:
 - `/api/account`
 - `/api/market?coin=bitcoin&currency=usd`
-- `/api/markets?currency=usd&limit=50`
+- `/api/markets?currency=usd&limit=250`
+- `/api/coins` (all coins directory)
 - `/api/ohlc?coin=bitcoin&currency=usd&days=1`
 - `/api/trade/execute` (spot/futures demo)
 - `/api/trade/status` (live running trade P/L)
 - `/api/trade/close` (manual close futures position)
 - `/api/bot/start`, `/api/bot/stop`, `/api/bot/status`
+
+Fees (exchange-style demo):
+- Spot: 0.10% per trade side
+- Futures: 0.06% open + 0.06% close
+- Bot: 0.06% open + 0.06% close
 
 ## Run
 

@@ -18,9 +18,15 @@ COINGECKO_SIMPLE_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
 COINGECKO_MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
 COINGECKO_MARKET_CHART_URL = "https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
 COINGECKO_OHLC_URL = "https://api.coingecko.com/api/v3/coins/{coin}/ohlc"
+COINGECKO_COINS_LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
 
 DEFAULT_COIN = "bitcoin"
 DEFAULT_CURRENCY = "usd"
+SPOT_FEE_RATE = 0.001
+FUTURES_FEE_RATE_OPEN = 0.0006
+FUTURES_FEE_RATE_CLOSE = 0.0006
+BOT_FEE_RATE_OPEN = 0.0006
+BOT_FEE_RATE_CLOSE = 0.0006
 
 INDICATORS = {"sma", "ema", "rsi", "macd"}
 TIMEFRAMES = {
@@ -208,6 +214,45 @@ def _fetch_market_list(currency: str, limit: int) -> list[dict]:
     return parsed
 
 
+def _fetch_coins_directory() -> list[dict]:
+    cache_key = "coins:directory"
+    fresh = _cache_get_fresh(cache_key, 6 * 60 * 60)
+    if fresh is not None:
+        return fresh
+
+    try:
+        data = _request_json(
+            COINGECKO_COINS_LIST_URL,
+            {
+                "include_platform": "false",
+            },
+        )
+    except HTTPError as exc:
+        if exc.code == 429:
+            stale = _cache_get_stale(cache_key)
+            if stale is not None:
+                return stale
+        raise
+
+    if not isinstance(data, list):
+        return []
+
+    parsed = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        parsed.append(
+            {
+                "id": item.get("id"),
+                "symbol": item.get("symbol"),
+                "name": item.get("name"),
+            }
+        )
+    if parsed:
+        _cache_set(cache_key, parsed)
+    return parsed
+
+
 def _fetch_price_series(coin: str, currency: str, days: str) -> list[float]:
     cache_key = f"series:{coin}:{currency}:{days}"
     fresh = _cache_get_fresh(cache_key, 90)
@@ -378,6 +423,7 @@ def _execute_spot_trade(coin: str, side: str, amount_usd: float, price: float) -
         raise ValueError("Invalid market price.")
 
     quantity = amount_usd / price
+    fee_usd = amount_usd * SPOT_FEE_RATE
 
     with state_lock:
         current_balance = demo_account["balance_usd"]
@@ -385,9 +431,10 @@ def _execute_spot_trade(coin: str, side: str, amount_usd: float, price: float) -
         coin_quantity = _safe_float(holdings.get(coin), 0.0)
 
         if side == "buy":
-            if amount_usd > current_balance:
+            total_cost = amount_usd + fee_usd
+            if total_cost > current_balance:
                 raise ValueError("Demo balance kam hai.")
-            demo_account["balance_usd"] = current_balance - amount_usd
+            demo_account["balance_usd"] = current_balance - total_cost
             holdings[coin] = round(coin_quantity + quantity, 8)
         else:
             if quantity > coin_quantity:
@@ -397,7 +444,7 @@ def _execute_spot_trade(coin: str, side: str, amount_usd: float, price: float) -
                 holdings.pop(coin, None)
             else:
                 holdings[coin] = round(new_quantity, 8)
-            demo_account["balance_usd"] = current_balance + amount_usd
+            demo_account["balance_usd"] = current_balance + amount_usd - fee_usd
 
         trade = {
             "timestamp": _now_iso(),
@@ -407,6 +454,7 @@ def _execute_spot_trade(coin: str, side: str, amount_usd: float, price: float) -
             "amount_usd": round(amount_usd, 2),
             "price": round(price, 6),
             "quantity": round(quantity, 8),
+            "fee_usd": round(fee_usd, 4),
             "status": "filled",
         }
         _append_trade(trade)
@@ -429,7 +477,7 @@ def _execute_futures_trade(coin: str, side: str, amount_usd: float, leverage: fl
         raise ValueError("Invalid market price.")
 
     notional = amount_usd * leverage
-    fee = notional * 0.0006
+    fee = notional * FUTURES_FEE_RATE_OPEN
 
     with state_lock:
         total_required = amount_usd + fee
@@ -546,7 +594,7 @@ def _close_futures_position(position_id: int, currency: str = "usd") -> dict:
     live_position = _compute_position_live(target, current_price)
     margin = _safe_float(live_position.get("margin_usd"), 0.0)
     pnl_usd = _safe_float(live_position.get("pnl_usd"), 0.0)
-    close_fee = _safe_float(live_position.get("notional_usd"), 0.0) * 0.0003
+    close_fee = _safe_float(live_position.get("notional_usd"), 0.0) * FUTURES_FEE_RATE_CLOSE
 
     with state_lock:
         target_index = -1
@@ -594,6 +642,8 @@ def _close_bot_position(reason: str, close_price: float) -> dict | None:
     entry_price = _safe_float(position["entry_price"], 0.0)
     leverage = _safe_float(position["leverage"], 1.0)
     amount_usd = _safe_float(position["amount_usd"], 0.0)
+    notional_usd = _safe_float(position.get("notional_usd"), amount_usd * leverage)
+    open_fee_usd = _safe_float(position.get("open_fee_usd"), 0.0)
     if entry_price <= 0 or amount_usd <= 0:
         bot_state["open_position"] = None
         return None
@@ -601,7 +651,8 @@ def _close_bot_position(reason: str, close_price: float) -> dict | None:
     price_move_pct = ((close_price - entry_price) / entry_price) * 100.0
     pnl_pct = price_move_pct * direction * leverage
     pnl_usd = amount_usd * (pnl_pct / 100.0)
-    demo_account["balance_usd"] += pnl_usd
+    close_fee_usd = notional_usd * BOT_FEE_RATE_CLOSE
+    demo_account["balance_usd"] += amount_usd + pnl_usd - close_fee_usd
 
     close_trade = {
         "timestamp": _now_iso(),
@@ -614,6 +665,9 @@ def _close_bot_position(reason: str, close_price: float) -> dict | None:
         "leverage": leverage,
         "pnl_usd": round(pnl_usd, 4),
         "pnl_pct": round(pnl_pct, 4),
+        "open_fee_usd": round(open_fee_usd, 4),
+        "close_fee_usd": round(close_fee_usd, 4),
+        "total_fees_usd": round(open_fee_usd + close_fee_usd, 4),
         "reason": reason,
         "status": "closed",
     }
@@ -670,16 +724,24 @@ def _run_bot() -> None:
 
                 if bot_state["running"] and bot_state["open_position"] is None and signal in {"buy", "sell"}:
                     amount = _safe_float(settings.get("amount_usd"), 0.0)
-                    if amount > demo_account["balance_usd"]:
+                    leverage = _safe_float(settings.get("leverage"), 1.0)
+                    notional = amount * leverage
+                    open_fee = notional * BOT_FEE_RATE_OPEN
+                    total_required = amount + open_fee
+
+                    if total_required > demo_account["balance_usd"]:
                         bot_state["last_error"] = "Bot trade ke liye demo balance kam hai."
                     elif amount > 0 and current_price > 0:
+                        demo_account["balance_usd"] -= total_required
                         bot_state["open_position"] = {
                             "opened_at": _now_iso(),
                             "coin": coin,
                             "side": signal,
                             "entry_price": round(current_price, 6),
                             "amount_usd": amount,
-                            "leverage": _safe_float(settings.get("leverage"), 1.0),
+                            "leverage": leverage,
+                            "notional_usd": round(notional, 2),
+                            "open_fee_usd": round(open_fee, 4),
                         }
                         _append_trade(
                             {
@@ -689,7 +751,9 @@ def _run_bot() -> None:
                                 "side": signal,
                                 "entry_price": round(current_price, 6),
                                 "amount_usd": round(amount, 2),
-                                "leverage": _safe_float(settings.get("leverage"), 1.0),
+                                "leverage": leverage,
+                                "notional_usd": round(notional, 2),
+                                "fee_usd": round(open_fee, 4),
                                 "status": "opened",
                             }
                         )
@@ -833,7 +897,7 @@ def api_markets():
     except ValueError:
         return jsonify({"error": "Invalid query params."}), 400
 
-    limit = max(5, min(limit, 100))
+    limit = max(5, min(limit, 250))
 
     try:
         raw_markets = _fetch_market_list(currency=currency, limit=limit)
@@ -869,6 +933,28 @@ def api_markets():
             "count": len(markets),
             "fetched_at": _now_iso(),
             "markets": markets,
+        }
+    )
+
+
+@app.route("/api/coins", methods=["GET"])
+def api_coins():
+    try:
+        coins = _fetch_coins_directory()
+    except HTTPError as exc:
+        if exc.code == 429:
+            return jsonify({"error": "Market API rate limit hit. Thori dair baad retry karein."}), 429
+        return jsonify({"error": "Market provider error", "details": f"HTTP {exc.code}"}), 502
+    except URLError:
+        return jsonify({"error": "Provider se connection nahi ho saka."}), 503
+    except json.JSONDecodeError:
+        return jsonify({"error": "Provider ne invalid response diya."}), 502
+
+    return jsonify(
+        {
+            "count": len(coins),
+            "coins": coins,
+            "fetched_at": _now_iso(),
         }
     )
 
@@ -1061,8 +1147,9 @@ def api_bot_start():
     with state_lock:
         if bot_state["running"]:
             return jsonify({"error": "Bot pehle se running hai."}), 409
-        if amount_usd > demo_account["balance_usd"]:
-            return jsonify({"error": "Demo balance bot amount se kam hai."}), 400
+        required = amount_usd + (amount_usd * leverage * BOT_FEE_RATE_OPEN)
+        if required > demo_account["balance_usd"]:
+            return jsonify({"error": "Demo balance bot amount + opening fee se kam hai."}), 400
 
     settings = {
         "coin": coin,

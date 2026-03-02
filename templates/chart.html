@@ -3,10 +3,6 @@
 {% block title %}Chart - CRYPTO-APP-DEMO{% endblock %}
 {% block page_id %}chart{% endblock %}
 
-{% block head_extra %}
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-{% endblock %}
-
 {% block content %}
 <section class="hero-block">
     <h1>Candlestick Chart</h1>
@@ -36,7 +32,9 @@
     </div>
 
     <p id="chart-status" class="status-text">Chart load ho raha hai...</p>
-    <div id="candlestick-chart" class="chart-box"></div>
+    <div id="candlestick-chart" class="chart-box">
+        <canvas id="candlestick-canvas"></canvas>
+    </div>
 </section>
 {% endblock %}
 
