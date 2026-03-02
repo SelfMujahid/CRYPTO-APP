@@ -49,3 +49,11 @@ APK local Android Studio ke baghair bhi ban sakta hai via GitHub Actions.
 6. Build complete hone par artifact `crypto-app-debug-apk` download karo
 
 Android wrapper project path: `android-webview-app/`
+
+## Quick Deploy (Render)
+
+1. Render account me `New +` -> `Blueprint` select karo
+2. GitHub repo `CRYPTO-APP-DEMO` connect karo
+3. Render `render.yaml` se service create karega
+4. Deploy ke baad URL milega, e.g. `https://crypto-app-demo.onrender.com`
+5. Isi URL ko GitHub Action `Build Android APK` ke `app_url` me do
